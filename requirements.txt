@@ -1,0 +1,8 @@
+ultralytics
+opencv-python
+numpy
+pandas
+pyyaml
+matplotlib
+scikit-learn
+firebase-admin

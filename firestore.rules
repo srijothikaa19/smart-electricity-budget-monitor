@@ -1,0 +1,20 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function ownsDevice(id) {
+      return request.auth != null &&
+        get(/databases/$(database)/documents/devices/$(id)).data.owner_uid == request.auth.uid;
+    }
+    match /devices/{id} {
+      allow read: if request.auth != null && resource.data.owner_uid == request.auth.uid;
+      allow update: if request.auth != null
+        && resource.data.owner_uid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['budget','cycle_start_day','tariff','forecast_dirty']);
+    }
+    match /forecasts/{id}   { allow read: if ownsDevice(id); }
+    match /readings/{doc}   { allow read: if ownsDevice(resource.data.device_id); }
+    match /rejections/{doc} { allow read: if ownsDevice(resource.data.device_id); }
+    match /captures/{doc}   { allow read, write: if false; }
+  }
+}

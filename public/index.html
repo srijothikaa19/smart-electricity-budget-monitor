@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Electricity</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:760px;margin:0 auto;padding:16px;background:#f6f7f9;color:#1a1a1a}
+.card{background:#fff;border-radius:10px;padding:14px;margin:12px 0;box-shadow:0 1px 3px #0002}
+.badge{display:inline-block;padding:6px 14px;border-radius:20px;color:#fff;font-weight:700}
+.RED{background:#d32f2f}.AMBER{background:#ef8f00}.GREEN{background:#2e7d32}.NONE{background:#777}
+.bar{position:relative;height:18px;background:#e3e5e8;border-radius:9px;overflow:hidden;margin:8px 0}
+.bar i{position:absolute;left:0;top:0;bottom:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.grid .card{margin:0}.big{font-size:1.4em;font-weight:700}.muted{color:#666;font-size:.85em}
+table{width:100%;border-collapse:collapse;font-size:.85em}td,th{padding:4px;border-bottom:1px solid #eee;text-align:left}
+input,select,button{padding:6px;margin:3px 0;font-size:1em}label{display:block;margin-top:6px}
+canvas{width:100%;height:180px;display:block}
+</style></head><body>
+<h2>Smart Electricity: budget monitor</h2>
+<div id="login" class="card" hidden>
+  <input id="em" type="email" placeholder="email"><br>
+  <input id="pw" type="password" placeholder="password"><br>
+  <button id="in">Sign in</button> <span id="err" class="muted"></span>
+</div>
+<div id="app" hidden>
+  <div class="muted">Signed in as <span id="who"></span> <button id="out">Sign out</button></div>
+  <select id="dev"></select>
+  <div id="nodev" class="card" hidden></div>
+  <div id="main">
+    <div class="card"><span id="badge" class="badge NONE">NO DATA</span> <span id="msg"></span>
+      <div class="muted" id="flags"></div></div>
+    <div class="grid">
+      <div class="card"><div class="muted">Latest accepted reading</div><div class="big" id="last">-</div><div class="muted" id="lastt"></div></div>
+      <div class="card"><div class="muted">Used this cycle</div><div class="big" id="used">-</div><div class="muted" id="usedb"></div></div>
+      <div class="card"><div class="muted">Projected units</div><div class="big" id="proj">-</div><div class="muted" id="band"></div></div>
+      <div class="card"><div class="muted">Projected bill</div><div class="big" id="pbill">-</div><div class="muted" id="bband"></div></div>
+      <div class="card"><div class="muted">Daily allowance</div><div class="big" id="allow">-</div><div class="muted">units/day to stay in budget</div></div>
+    </div>
+    <div class="card"><div>Budget: <b id="bgt">not set</b></div>
+      <div class="bar"><i id="b2" style="background:#9bb"></i><i id="b1" style="background:#345"></i></div>
+      <div class="muted">dark = bill so far, light = projected bill</div></div>
+    <div class="card"><b>Daily consumption (last 30 days)</b>
+      <canvas id="chart"></canvas>
+      <div class="muted">kWh per day, estimated from accepted readings assuming steady use between them.</div></div>
+    <div class="card"><b>Settings</b>
+      <label>Budget per cycle (₹) <input id="bg" type="number" min="0"></label>
+      <label>Cycle start day (1-28) <input id="sd" type="number" min="1" max="28"></label>
+      <label>Fixed charge <input id="fc" type="number" min="0"></label>
+      <label>Slab 1: up to <input id="u1" type="number" min="1"> units, rate <input id="r1" type="number" step="0.01" min="0"></label>
+      <label>Slab 2: up to <input id="u2" type="number" min="1"> units, rate <input id="r2" type="number" step="0.01" min="0"></label>
+      <label>Slab 3: all remaining units, rate <input id="r3" type="number" step="0.01" min="0"></label>
+      <button id="save">Save</button> <span id="sv" class="muted"></span></div>
+    <div class="card"><b>Rejected or quarantined readings</b><div id="rej" class="muted">-</div></div>
+    <div class="muted">Default tariff slabs are placeholders, not any utility's rates. Edit them above.</div>
+  </div>
+</div>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getAuth,onAuthStateChanged,signInWithEmailAndPassword,signOut} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {getFirestore,collection,query,where,orderBy,limit,getDocs,getDoc,doc,updateDoc} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+import {cfg} from "./firebase-config.js?v=2";
+
+const auth=getAuth(initializeApp(cfg)), db=getFirestore();
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const money=n=>"₹"+Number(n).toLocaleString("en-IN",{maximumFractionDigits:0});
+const num=n=>Number(n).toLocaleString("en-IN",{maximumFractionDigits:1});
+const DEF={fixed_charge:50,slabs:[{upto:100,rate:3},{upto:200,rate:5},{upto:null,rate:8}]};
+
+$("in").onclick=async()=>{try{await signInWithEmailAndPassword(auth,$("em").value,$("pw").value);$("err").textContent=""}
+  catch(e){$("err").textContent="Sign-in failed: "+e.code}};
+$("out").onclick=()=>signOut(auth);
+
+onAuthStateChanged(auth,async u=>{
+  $("login").hidden=!!u; $("app").hidden=!u;
+  if(!u) return;
+  $("who").textContent=u.email;
+  const s=await getDocs(query(collection(db,"devices"),where("owner_uid","==",u.uid)));
+  if(s.empty){
+    $("main").hidden=true; $("nodev").hidden=false; $("dev").hidden=true;
+    $("nodev").innerHTML="No meter is linked to this account yet. On the laptop run:<br><code>python src\\set_device.py meter1 owner_uid="+esc(u.uid)+"</code>";
+    return;
+  }
+  $("main").hidden=false; $("nodev").hidden=true; $("dev").hidden=false;
+  $("dev").innerHTML=s.docs.map(d=>`<option>${esc(d.id)}</option>`).join("");
+  load();
+});
+$("dev").onchange=load;
+setInterval(()=>{if(auth.currentUser) load()},60000);
+
+async function load(){
+  const id=$("dev").value; if(!id) return;
+  const d=(await getDoc(doc(db,"devices",id))).data()||{};
+  const fs=await getDoc(doc(db,"forecasts",id));
+  show(id,d,fs.exists()?fs.data():null);
+  try{
+    const rs=await getDocs(query(collection(db,"rejections"),where("device_id","==",id),orderBy("processed_at","desc"),limit(15)));
+    const rows=rs.docs.map(x=>x.data());
+    $("rej").innerHTML=rows.length?"<table><tr><th>Time</th><th>Status</th><th>Frame readings</th></tr>"+
+      rows.map(r=>`<tr><td>${esc(new Date(r.captured_at).toLocaleString())}</td><td>${esc(r.status)}</td><td>${esc((r.frame_readings||[]).join(", "))}</td></tr>`).join("")+"</table>":"None";
+  }catch(e){console.error(e);$("rej").textContent="Could not load: "+e.message+" (if it offers an index link in the browser console, open it once)"}
+}
+
+function drawChart(rows){
+  const c=$("chart"),ctx=c.getContext("2d"),dpr=window.devicePixelRatio||1;
+  const w=c.clientWidth,h=c.clientHeight;
+  c.width=w*dpr;c.height=h*dpr;ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,w,h);
+  ctx.font="11px system-ui";ctx.fillStyle="#666";
+  rows=(rows||[]).slice(-30);
+  if(!rows.length){ctx.fillText("No daily data yet",8,20);return}
+  const max=Math.max(...rows.map(r=>r.kwh))*1.1||1,pl=34,pb=18,pt=8;
+  const bw=(w-pl)/rows.length,ph=h-pb-pt;
+  ctx.strokeStyle="#ddd";ctx.beginPath();ctx.moveTo(pl,pt);ctx.lineTo(pl,pt+ph);ctx.lineTo(w,pt+ph);ctx.stroke();
+  ctx.fillText(num(max),2,pt+8);ctx.fillText("0",pl-12,pt+ph);
+  ctx.fillStyle="#345";
+  rows.forEach((r,i)=>{const bh=r.kwh/max*ph;ctx.fillRect(pl+i*bw+1,pt+ph-bh,Math.max(1,bw-2),bh)});
+  ctx.fillStyle="#666";ctx.fillText(rows[0].d.slice(5),pl,h-4);
+  const e=rows[rows.length-1].d.slice(5);ctx.fillText(e,w-ctx.measureText(e).width,h-4);
+}
+
+function show(id,d,f){
+  const dec=d.decimals||0, t=d.tariff||DEF, flags=[];
+  if(id.startsWith("SYNTHETIC")) flags.push("SYNTHETIC demo data");
+  if(d.forecast_dirty) flags.push("settings saved, waiting for the worker to refresh the forecast");
+  if(d.last_reading){$("last").textContent=num(Number(d.last_reading)/10**dec)+" kWh";$("lastt").textContent=new Date(d.last_time).toLocaleString()}
+  else{$("last").textContent="-";$("lastt").textContent=""}
+  $("bgt").textContent=d.budget==null?"not set":money(d.budget);
+  $("bg").value=d.budget??""; $("sd").value=d.cycle_start_day??1; $("fc").value=t.fixed_charge;
+  $("u1").value=t.slabs[0].upto; $("r1").value=t.slabs[0].rate;
+  $("u2").value=t.slabs[1].upto; $("r2").value=t.slabs[1].rate; $("r3").value=t.slabs[2].rate;
+  if(!f||!f.ok){
+    drawChart(null);
+    $("badge").className="badge NONE";$("badge").textContent="NO FORECAST";
+    $("msg").textContent="Needs at least 2 accepted readings.";
+    ["used","usedb","proj","band","pbill","bband","allow"].forEach(k=>$(k).textContent="-");
+    $("b1").style.width=$("b2").style.width="0";$("flags").textContent=flags.join(" | ");return;
+  }
+  const a=f.alert||{level:"NONE",message:""};
+  $("badge").className="badge "+a.level;$("badge").textContent=a.level;$("msg").textContent=a.message;
+  if(f.cold_start) flags.push("early in the cycle: rough estimate");
+  if(Date.now()-new Date(f.last_reading_time)>48*3600e3) flags.push("STALE: no accepted reading for 48 hours");
+  if(!f.covers_full_cycle) flags.push("readings began after the cycle start: earlier usage is not counted");
+  flags.push(f.history_days+" days of history, Random Forest weight "+f.rf_weight);
+  $("flags").textContent=flags.join(" | ");
+  $("used").textContent=num(f.units_so_far)+" kWh";$("usedb").textContent="bill so far "+money(f.bill_so_far);
+  $("proj").textContent=num(f.projected_units)+" kWh";$("band").textContent="range "+num(f.units_low)+" to "+num(f.units_high);
+  $("pbill").textContent=money(f.projected_bill);$("bband").textContent="range "+money(f.bill_low)+" to "+money(f.bill_high);
+  $("allow").textContent=f.daily_allowance_units==null?"-":num(f.daily_allowance_units);
+  const b=d.budget;
+  $("b1").style.width=b?Math.min(100,f.bill_so_far/b*100)+"%":"0";
+  $("b2").style.width=b?Math.min(100,f.projected_bill/b*100)+"%":"0";
+  drawChart(f.daily);
+}
+
+$("save").onclick=async()=>{
+  const id=$("dev").value,n=x=>Number($(x).value);
+  const t={fixed_charge:n("fc"),slabs:[{upto:n("u1"),rate:n("r1")},{upto:n("u2"),rate:n("r2")},{upto:null,rate:n("r3")}]};
+  const nums=[t.fixed_charge,t.slabs[0].upto,t.slabs[0].rate,t.slabs[1].upto,t.slabs[1].rate,t.slabs[2].rate,n("sd")];
+  if(nums.some(x=>!Number.isFinite(x)||x<0)||t.slabs[0].upto>=t.slabs[1].upto){$("sv").textContent="Check the numbers: slab 1 limit must be below slab 2.";return}
+  const upd={tariff:t,cycle_start_day:Math.max(1,Math.min(28,Math.round(n("sd")))),
+             budget:$("bg").value===""?null:n("bg"),forecast_dirty:true};
+  try{await updateDoc(doc(db,"devices",id),upd);$("sv").textContent="Saved. The forecast updates when the worker next runs.";load()}
+  catch(e){$("sv").textContent="Save failed: "+e.code}
+};
+</script></body></html>

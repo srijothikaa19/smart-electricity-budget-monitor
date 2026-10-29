@@ -1,0 +1,6 @@
+path: D:/Smart_electricity/data/labeled/display_ds1
+train: train/images
+val: valid/images
+test: test/images
+nc: 1
+names: ['display']

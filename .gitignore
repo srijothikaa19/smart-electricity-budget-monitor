@@ -1,0 +1,23 @@
+# environments and secrets
+venv/
+.venv/
+.env
+config/firebase_key.json
+public/firebase-config.js
+secrets.h
+
+# data, models' training output, generated files
+data/
+runs/
+docs/previews/
+docs/diag/
+docs/debug/
+docs/class_peek/
+
+# tools and caches
+__pycache__/
+*.pyc
+node_modules/
+firebase-debug.log
+.firebase/
+.vscode/
